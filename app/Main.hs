@@ -1,4 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
 import Data.Aeson
 import Network.HTTP.Simple
@@ -8,14 +9,16 @@ import Data.String (IsString(fromString))
 type Latitude = Float
 type Longitude = Float
 type Temperature = Float
+type Address = String
+type Forecast = String
 
 data Location = Location { lat :: Latitude, lng :: Longitude } deriving Show
 newtype Geometry = Geometry { location :: Location } deriving Show
-newtype GeoCodeResult = GeoCodeResult { geometry :: Geometry } deriving Show
+data GeoCodeResult = GeoCodeResult { geometry :: Geometry, formattedAddress :: Address } deriving Show
 newtype GeoCodeResults = GeoCodeResults { results :: [GeoCodeResult] } deriving Show
 
-data TemperatureData = TemperatureData { temp :: Temperature, feels_like :: Temperature } deriving Show
-newtype WeatherData = WeatherData { description :: String } deriving Show
+data TemperatureData = TemperatureData { temp :: Temperature, feelsLike :: Temperature } deriving Show
+newtype WeatherData = WeatherData { forecast :: Forecast } deriving Show
 data WeatherResults = WeatherResults { weather :: WeatherData, tempData :: TemperatureData } deriving Show
 
 instance FromJSON Location where
@@ -34,7 +37,8 @@ instance FromJSON Geometry where
 instance FromJSON GeoCodeResult where
     parseJSON (Object v) = do
         geometry' <- v .: "geometry"
-        return $ GeoCodeResult { geometry = geometry' }
+        formattedAddress' <- v .: "formatted_address"
+        return $ GeoCodeResult { geometry = geometry', formattedAddress = formattedAddress' }
     parseJSON _ = mzero
 
 instance FromJSON GeoCodeResults where
@@ -46,14 +50,14 @@ instance FromJSON GeoCodeResults where
 instance FromJSON TemperatureData where
     parseJSON (Object v) = do
         temp' <- v .: "temp"
-        feels_like' <- v .: "feels_like"
-        return $ TemperatureData { temp = temp', feels_like = feels_like' }
+        feelsLike' <- v .: "feels_like"
+        return $ TemperatureData { temp = temp', feelsLike = feelsLike' }
     parseJSON _ = mzero
 
 instance FromJSON WeatherData where
     parseJSON (Object v) = do
-        description' <- v .: "description"
-        return $ WeatherData { description = description' }
+        forecast' <- v .: "description"
+        return $ WeatherData { forecast = forecast' }
     parseJSON _ = mzero
 
 instance FromJSON WeatherResults where
@@ -63,11 +67,12 @@ instance FromJSON WeatherResults where
         return $ WeatherResults { weather = head weather', tempData = tempData' }
     parseJSON _ = mzero
 
-getGeoCodeResults :: String -> IO GeoCodeResults
+getGeoCodeResults :: Address -> IO GeoCodeResults
 getGeoCodeResults a = do
     request' <- parseRequest "GET https://maps.googleapis.com/maps/api/geocode/json"
     let request
-            = setRequestQueryString [("key",Just "AIzaSyAQcuLCegTwRZMNKTebXmZ5FJuPebxzzys"), ("address", Just $ fromString a)]
+            = setRequestQueryString [   ("key",Just "AIzaSyAQcuLCegTwRZMNKTebXmZ5FJuPebxzzys")
+                                        , ("address", Just $ fromString a)]
             request'
     response <- httpJSON request :: IO (Response GeoCodeResults)
     return $ getResponseBody response
@@ -84,16 +89,42 @@ getWeatherResults lt lo = do
     response <- httpJSON request :: IO (Response WeatherResults)
     return $ getResponseBody response
 
+getResultsForAddress :: IO Address -> (Address -> IO GeoCodeResults) -> IO GeoCodeResults
+getResultsForAddress a r = a >>= r
+
+getLocationFromResult :: GeoCodeResult -> Location
+getLocationFromResult r = location $ geometry r
+
+getResultArray :: IO Address -> IO [GeoCodeResult]
+getResultArray a = results <$> getResultsForAddress a getGeoCodeResults
+
+selectLocation :: IO [GeoCodeResult] -> IO Location
+selectLocation r = do
+    geoCodeResults <- r
+    let options = zip [1 .. length geoCodeResults] $ map formattedAddress geoCodeResults
+    print "Select your address:"
+    mapM_ (\x -> print $ show (fst x) ++ ") " ++ snd x) options
+    addressSelection :: Int <- readLn
+    if addressSelection > 0 && addressSelection <= length geoCodeResults
+        then return $ getLocationFromResult $ last $ take addressSelection geoCodeResults
+        else selectLocation r
+
+getLocation :: IO Location
+getLocation = do
+    print "Search for your address to get your weather forcast:"
+    geoCodeResults <- getResultArray getLine
+    case geoCodeResults of
+        [] -> getLocation
+        _  ->  selectLocation $ pure geoCodeResults
+
+
 main :: IO ()
 main = do
-    print "Enter your address to get your weather forcast:"
-    address <- getLine
-    geoCodeResults <- getGeoCodeResults address
-    let yourLocation = location $ geometry $ head $ results geoCodeResults
+    yourLocation <- getLocation
     let yourLat = lat yourLocation
     let yourLong = lng yourLocation
     print $ "Your location is " ++ show yourLat ++ "," ++ show yourLong
     weatherResults <- getWeatherResults yourLat yourLong
     let yourTemp = temp $ tempData weatherResults
-    let yourWeather = description $ weather weatherResults
-    print $ "Your temperature is " ++ show yourTemp ++ "F and your forcast is " ++ yourWeather
+    let yourForecast = forecast $ weather weatherResults
+    print $ "Your temperature is " ++ show yourTemp ++ "F and your forcast is " ++ yourForecast
